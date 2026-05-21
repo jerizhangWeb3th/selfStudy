@@ -17,6 +17,7 @@ from loguru import logger
 from playwright.async_api import Playwright, async_playwright, Page
 import pyJianYingDraft as draft
 from pyJianYingDraft import IntroType, TransitionType, trange, tim
+import playwright_stealth
 BASE_DIR = Path(__file__).parent.resolve()
 LOCAL_CHROME_PATH = "/Users/link04/Library/Caches/ms-playwright/chromium-1124/chrome-mac/Chromium.app/Contents/MacOS/Chromium"
 
@@ -116,8 +117,14 @@ douyin_logger = create_logger('douyin', 'logs/douyin.log')
 
 # -------------------- Douyin Cookie 验证 --------------------
 async def set_init_script(context):
-    stealth_js_path = Path(BASE_DIR / "stealth.min.js")
-    await context.add_init_script(path=stealth_js_path)
+    """使用 playwright_stealth 进行完整的浏览器指纹伪装"""
+    stealth = playwright_stealth.Stealth(
+        navigator_platform_override="Win32",
+        webgl_vendor_override="Google Inc.",
+        webgl_renderer_override="Intel Iris OpenGL Engine",
+        navigator_user_agent_override=None,  # 使用默认 UA
+    )
+    await stealth.apply_stealth_async(context)
     return context
 
 
@@ -183,14 +190,39 @@ class DouYinVideo:
 
     async def upload(self, playwright: Playwright) -> None:
         """上传视频流程"""
-        # 启动浏览器
+        # 启动浏览器（禁用自动化标识）
+        browser_args = [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-dev-shm-usage',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+        ]
         if self.local_executable_path:
-            browser = await playwright.chromium.launch(headless=False, executable_path=self.local_executable_path)
+            browser = await playwright.chromium.launch(
+                headless=False,
+                executable_path=self.local_executable_path,
+                args=browser_args
+            )
         else:
-            browser = await playwright.chromium.launch(headless=False)
+            browser = await playwright.chromium.launch(
+                headless=False,
+                args=browser_args
+            )
 
-        # 创建上下文并加载 cookie
-        context = await browser.new_context(storage_state=f"{self.account_file}")
+        # 创建上下文并加载 cookie（设置浏览器指纹）
+        context = await browser.new_context(
+            storage_state=f"{self.account_file}",
+            viewport={"width": 1920, "height": 1080},
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            permissions=["geolocation", "notifications", "camera", "microphone"],
+            extra_http_headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            },
+            ignore_https_errors=True,
+        )
         context = await set_init_script(context)
         page = await context.new_page()
         await page.goto("https://creator.douyin.com/creator-micro/content/upload")
