@@ -85,7 +85,7 @@ async def main():
             ("chromeApp", True),
             ("chromeRuntime", True),
             ("uaDataPlatform", "macOS"),
-            ("webdriver", "undefined"),
+            ("webdriver", "false"),
             ("cdpVars", 0),
         ]:
             total += 1

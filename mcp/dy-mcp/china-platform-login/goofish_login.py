@@ -23,7 +23,7 @@ _sau = str(Path.home() / ".local/share/uv/tools/social-auto-upload/lib/python3.1
 if _sau not in sys.path:
     sys.path.insert(0, _sau)
 
-from stealth_core import MAC_UA, LAUNCH_ARGS, STEALTH_SCRIPT, find_chrome, ensure_display  # noqa: E402
+from stealth_core import MAC_UA, LAUNCH_ARGS, STEALTH_SCRIPT, find_chrome, ensure_display, goto_with_stealth  # noqa: E402
 
 QR_DIR = BASE_DIR / "qr"
 COOKIE_DIR = BASE_DIR / "cookies"
@@ -101,15 +101,10 @@ async def main():
         await context.add_init_script(STEALTH_SCRIPT)
         page = await context.new_page()
 
-        # 1. 打开登录页 → 截二维码
-        await page.goto(LOGIN_URL, wait_until="load", timeout=30000)
+        # 1. 打开登录页 → 截二维码（commit 时注入 stealth）
+        await goto_with_stealth(page, LOGIN_URL, timeout=30000)
         await page.wait_for_timeout(10000)
-        # 导航后重新注入（关键）
-        try:
-            await page.evaluate(STEALTH_SCRIPT)
-            print("✅ 导航后重新注入 stealth", flush=True)
-        except Exception as e:
-            print(f"⚠️ stealth 注入失败: {str(e)[:60]}")
+        print("✅ stealth 已在页面脚本前注入", flush=True)
 
         if await extract_qr(page):
             print(f"✅ 登录二维码: {QR_OUT} ({os.path.getsize(QR_OUT)//1024}KB)", flush=True)

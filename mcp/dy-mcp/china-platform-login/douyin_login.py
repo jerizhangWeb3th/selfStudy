@@ -29,7 +29,7 @@ _sau = str(Path.home() / ".local/share/uv/tools/social-auto-upload/lib/python3.1
 if _sau not in sys.path:
     sys.path.insert(0, _sau)
 
-from stealth_core import MAC_UA, LAUNCH_ARGS, STEALTH_SCRIPT, find_chrome, ensure_display  # noqa: E402
+from stealth_core import MAC_UA, LAUNCH_ARGS, STEALTH_SCRIPT, find_chrome, ensure_display, goto_with_stealth  # noqa: E402
 
 QR_DIR = BASE_DIR / "qr"
 COOKIE_DIR = BASE_DIR / "cookies"
@@ -88,15 +88,10 @@ async def extract_qr(page) -> str:
 
 
 async def goto_login(page):
-    """进入我是创作者登录页"""
-    await page.goto("https://creator.douyin.com/", wait_until="domcontentloaded", timeout=60000)
+    """进入我是创作者登录页（commit 时注入 stealth，早于页面脚本）"""
+    await goto_with_stealth(page, "https://creator.douyin.com/")
     await asyncio.sleep(3)
-    # 导航后必须重新注入 stealth（add_init_script 在部分环境失效）
-    try:
-        await page.evaluate(STEALTH_SCRIPT)
-        print("✅ 导航后重新注入 stealth", flush=True)
-    except Exception as e:
-        print(f"⚠️ stealth 注入失败: {str(e)[:60]}")
+    print("✅ stealth 已在页面脚本前注入", flush=True)
     if "creator-micro" in page.url:
         return "ALREADY_LOGGED"
     try:
