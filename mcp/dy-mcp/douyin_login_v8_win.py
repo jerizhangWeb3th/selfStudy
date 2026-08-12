@@ -239,17 +239,19 @@ async def main():
     async with async_playwright() as pw:
         launch_kwargs = dict(
             headless=False,
-            viewport={"width": 1440, "height": 900},
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-            device_scale_factor=2,
-            user_agent=MAC_UA,
             args=LAUNCH_ARGS,
         )
         if chrome:
             launch_kwargs["executable_path"] = chrome
 
-        context = await pw.chromium.launch(**launch_kwargs)
+        browser = await pw.chromium.launch(**launch_kwargs)
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            device_scale_factor=2,
+            user_agent=MAC_UA,
+        )
         # MAC 指纹覆盖（页面加载前）
         await context.add_init_script("(" + MAC_OVERRIDE_SCRIPT + ")()")
         page = await context.new_page()
@@ -262,6 +264,7 @@ async def main():
                 await context.storage_state(path=str(ACCOUNT_FILE))
                 write_state("SUCCESS", str(ACCOUNT_FILE))
                 await context.close()
+                await browser.close()
                 return
             if state != "QR_READY":
                 print("⚠️ 二维码未出现，重载", flush=True)
@@ -275,53 +278,250 @@ async def main():
             print(f"   📱 用抖音 APP 扫一扫二维码: {qr_path}", flush=True)
             print(f"   💡 提示: 扫码后请在手机上点「确认登录」", flush=True)
 
-            # 无限等待登录成功（不 reload！）
-            last_scan_log = 0
-            while True:
-                url = page.url
-                logged = "creator-micro" in url
-                if not logged:
-                    try:
-                        logout_btn = await page.query_selector("text=退出")
-                        if logout_btn:
-                            logged = True
-                    except Exception:
-                        pass
-                if logged:
-                    print(f"🎉 登录成功! URL={url[:80]}", flush=True)
-                    await asyncio.sleep(3)
-                    await context.storage_state(path=str(ACCOUNT_FILE))
-                    print(f"✅ cookie 已保存: {ACCOUNT_FILE}", flush=True)
-                    stamp = time.strftime("%H%M%S")
-                    shot = str(QR_DIR.parent / f"douyin_logged_{stamp}.png")
-                    try:
-                        await page.screenshot(path=shot, full_page=False)
-                        print(f"📸 登录成功截图: {shot}", flush=True)
-                    except Exception:
-                        pass
-                    write_state("SUCCESS", f"cookie={ACCOUNT_FILE}")
-                    await context.close()
-                    return
+            # 等待登录成功，处理扫脸/手机号验证
+            login_result = await wait_for_login(page, context, browser)
+            if login_result == "SUCCESS":
+                return
+            # 其他情况（如验证失败需重新扫码）则继续外层循环
+            print("⚠️ 验证未通过，重新获取二维码...", flush=True)
+            await asyncio.sleep(3)
 
-                # 检测扫码确认提示
-                now = time.monotonic()
-                if now - last_scan_log > 10:
-                    last_scan_log = now
-                    try:
-                        scanned = await page.evaluate("""() => {
-                            const text = document.body.innerText;
-                            if (text.includes('扫码成功') || text.includes('确认登录') ||
-                                text.includes('扫描成功') || text.includes('请在手机上')) return true;
-                            return false;
-                        }""")
-                        if scanned:
-                            print(f"📱 检测到扫码确认提示! ({time.strftime('%H:%M:%S')})", flush=True)
-                    except Exception:
-                        pass
 
-                await asyncio.sleep(3)
+async def check_logged_in(page) -> bool:
+    """检查是否已登录成功"""
+    url = page.url
+    if "creator-micro" in url:
+        return True
+    try:
+        logout_btn = await page.query_selector("text=退出")
+        if logout_btn:
+            return True
+    except Exception:
+        pass
+    return False
 
-        await context.close()
+
+async def save_login_success(page, context, browser) -> str:
+    """登录成功后保存 cookie 和截图"""
+    print(f"🎉 登录成功! URL={page.url[:80]}", flush=True)
+    await asyncio.sleep(3)
+    await context.storage_state(path=str(ACCOUNT_FILE))
+    print(f"✅ cookie 已保存: {ACCOUNT_FILE}", flush=True)
+    stamp = time.strftime("%H%M%S")
+    shot = str(QR_DIR.parent / f"douyin_logged_{stamp}.png")
+    try:
+        await page.screenshot(path=shot, full_page=False)
+        print(f"📸 登录成功截图: {shot}", flush=True)
+    except Exception:
+        pass
+    write_state("SUCCESS", f"cookie={ACCOUNT_FILE}")
+    await context.close()
+    await browser.close()
+    return "SUCCESS"
+
+
+async def click_face_verify(page) -> bool:
+    """自动点击「手机刷脸验证」
+
+    扫码后 #uc-second-verify 下出现验证方式选择，点击「手机刷脸验证」
+    返回是否成功点击
+    """
+    print("🔍 检测 #uc-second-verify 验证方式选择...", flush=True)
+
+    # 策略1: 精确匹配 #uc-second-verify 下含「手机刷脸验证」的元素
+    try:
+        el = page.locator("#uc-second-verify").locator("text=手机刷脸验证").first
+        if await el.count() > 0 and await el.is_visible():
+            await el.click(timeout=5000)
+            print("✅ 已点击「手机刷脸验证」(#uc-second-verify)", flush=True)
+            write_state("FACE_CLICKED", "已选择手机刷脸验证")
+            return True
+    except Exception:
+        pass
+
+    # 策略2: 直接点击 #uc-second-verify 内可点击的子元素
+    try:
+        container = page.locator("#uc-second-verify")
+        if await container.count() > 0 and await container.is_visible():
+            # 点击容器内含刷脸文字的元素
+            items = container.locator("div, span, a, button, li, p, label")
+            count = await items.count()
+            for i in range(count):
+                item = items.nth(i)
+                text = await item.text_content()
+                if text and ("刷脸" in text or "人脸" in text):
+                    await item.click(timeout=3000)
+                    print(f"✅ 已点击「{text.strip()}」(#uc-second-verify 子元素)", flush=True)
+                    write_state("FACE_CLICKED", "已选择手机刷脸验证")
+                    return True
+    except Exception:
+        pass
+
+    # 策略3: 文本匹配兜底
+    fallback_selectors = [
+        "text=手机刷脸验证",
+        "text=刷脸验证",
+        "text=人脸识别",
+        "text=扫脸验证",
+    ]
+    for sel in fallback_selectors:
+        try:
+            el = page.locator(sel).first
+            if await el.count() > 0 and await el.is_visible():
+                await el.click(timeout=3000)
+                print(f"✅ 已点击验证选项(选择器: {sel})", flush=True)
+                write_state("FACE_CLICKED", "已选择刷脸验证")
+                return True
+        except Exception:
+            continue
+
+    # 策略4: JS fallback 点击含刷脸文字的元素
+    try:
+        clicked = await page.evaluate("""() => {
+            // 优先在 #uc-second-verify 内查找
+            const container = document.querySelector('#uc-second-verify');
+            if (container) {
+                const all = container.querySelectorAll('div, span, a, button, li, p, label');
+                for (const el of all) {
+                    const text = el.innerText || el.textContent || '';
+                    if ((text.includes('手机刷脸') || text.includes('刷脸验证') ||
+                         text.includes('人脸识别') || text.includes('扫脸验证')) &&
+                         el.offsetParent !== null) {
+                        el.click();
+                        return true;
+                    }
+                }
+            }
+            // 全局 fallback
+            const all = document.querySelectorAll('div, span, a, button, li, p, label');
+            for (const el of all) {
+                const text = el.innerText || el.textContent || '';
+                if ((text.includes('手机刷脸') || text.includes('刷脸验证') ||
+                     text.includes('人脸识别') || text.includes('扫脸验证')) &&
+                     el.offsetParent !== null) {
+                    el.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if clicked:
+            print("✅ 已点击「手机刷脸验证」(JS fallback)", flush=True)
+            write_state("FACE_CLICKED", "已选择刷脸验证")
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+async def extract_face_qr(page) -> str:
+    """提取人脸验证二维码截图
+
+    点击人脸识别后约5秒出现新二维码，截图保存
+    """
+    print("⏳ 等待人脸验证二维码出现...", flush=True)
+    # 等待5秒让二维码渲染
+    await asyncio.sleep(5)
+
+    stamp = time.strftime("%H%M%S")
+    out = str(QR_DIR / f"douyin_face_qr_{stamp}.png")
+
+    # 先尝试提取 base64 图片
+    info = await page.evaluate("""() => {
+        const imgs = document.querySelectorAll('img');
+        for (const img of imgs) {
+            const src = String(img.src || '');
+            if (src.startsWith('data:image') && img.getBoundingClientRect().width > 80) return src;
+        }
+        return '';
+    }""")
+    if info.startswith("data:image"):
+        b64 = info.split(",", 1)[1]
+        with open(out, "wb") as f:
+            f.write(base64.b64decode(b64))
+        print(f"✅ 人脸验证二维码(base64): {out}", flush=True)
+    else:
+        # fallback: 截取页面中间区域
+        await page.screenshot(path=out, clip={"x": 570, "y": 180, "width": 300, "height": 300})
+        print(f"✅ 人脸验证二维码(截图): {out}", flush=True)
+
+    write_latest(out)
+    write_state("FACE_QR_READY", out)
+    return out
+
+
+async def wait_for_login(page, context, browser) -> str:
+    """等待登录完成，自动处理验证流程
+
+    简化逻辑：
+    1. 循环检测：URL 变了 → 登录成功；#uc-second-verify 出现 → 二次校验
+    2. 检测到 #uc-second-verify → 自动点击「手机刷脸验证」
+    3. 点击后等5秒 → 截图保存人脸二维码
+    4. 用户完成人脸识别 → 登录成功
+
+    返回值:
+        "SUCCESS" - 登录成功
+        "RETRY" - 需要重新扫码
+    """
+    face_clicked = False        # 是否已点击刷脸验证
+    face_qr_saved = False       # 是否已保存人脸二维码
+    face_scan_wait_start = 0    # 人脸扫描等待开始时间
+
+    while True:
+        # ---- 1. URL 变了 → 登录成功 ----
+        if await check_logged_in(page):
+            return await save_login_success(page, context, browser)
+
+        # ---- 2. 检测 #uc-second-verify → 二次校验 ----
+        try:
+            uc_verify = page.locator("#uc-second-verify")
+            if await uc_verify.count() > 0 :
+                print("🔒 检测到 #uc-second-verify 二次校验!", flush=True)
+                clicked = await click_face_verify(page)
+                if clicked:
+                    face_clicked = True
+                else:
+                    print("⚠️ 未找到刷脸验证选项，可能需要手动操作", flush=True)
+                    face_clicked = True
+        except Exception:
+            pass
+
+        # ---- 3. 点击刷脸验证后，提取人脸二维码截图 ----
+        if face_clicked and not face_qr_saved:
+            face_qr_path = await extract_face_qr(page)
+            face_qr_saved = True
+            face_scan_wait_start = time.monotonic()
+            print(f"📱 请用抖音 APP 扫描人脸验证二维码: {face_qr_path}", flush=True)
+            print(f"   ⏳ 等待人脸验证完成...", flush=True)
+
+        # ---- 4. 人脸二维码已保存，等待登录 ----
+        if face_qr_saved and face_scan_wait_start > 0:
+            elapsed = time.monotonic() - face_scan_wait_start
+            if elapsed >= 10:
+                if await check_logged_in(page):
+                    return await save_login_success(page, context, browser)
+                if elapsed >= 120:
+                    print("⚠️ 人脸验证超时，需要重新扫码", flush=True)
+                    write_state("FACE_TIMEOUT", "人脸验证超时")
+                    return "RETRY"
+
+        # ---- 5. 检测二维码过期/验证失败 ----
+        try:
+            expired = await page.evaluate("""() => {
+                const text = document.body.innerText;
+                return text.includes('二维码已过期') || text.includes('二维码失效') ||
+                       text.includes('验证失败') || text.includes('验证过期') ||
+                       text.includes('重新扫码') || text.includes('刷新二维码');
+            }""")
+            if expired:
+                print("⚠️ 二维码已过期或验证失败，需要重新扫码!", flush=True)
+                write_state("EXPIRED", "二维码过期")
+                return "RETRY"
+        except Exception:
+            pass
+
+        await asyncio.sleep(2)
 
 
 if __name__ == "__main__":
