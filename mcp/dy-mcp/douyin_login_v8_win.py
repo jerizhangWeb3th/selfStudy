@@ -57,65 +57,27 @@ LAUNCH_ARGS = [
     "--lang=zh-CN",
 ]
 
-MAC_OVERRIDE_SCRIPT = """() => {
+# 融合版指纹伪装（70+ 检测点）：goofish 60+ 点 + 小红书 UA-data
+try:
+    from dy_stealth import STEALTH_SCRIPT
+    print("✅ 加载融合 stealth (70+ 检测点)", flush=True)
+except Exception:
+    # fallback: 小红书 MAC 伪装（旧方案）
+    STEALTH_SCRIPT = "(" + r"""
+() => {
   try { Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel', configurable: true }); } catch(e) {}
   try { Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true }); } catch(e) {}
   try { Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true }); } catch(e) {}
   try { Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en-US'], configurable: true }); } catch(e) {}
-  try { Object.defineProperty(navigator, 'language', { get: () => 'zh-CN', configurable: true }); } catch(e) {}
   try { Object.defineProperty(screen, 'width', { get: () => 1440, configurable: true }); } catch(e) {}
   try { Object.defineProperty(screen, 'height', { get: () => 900, configurable: true }); } catch(e) {}
-  try { Object.defineProperty(screen, 'availWidth', { get: () => 1440, configurable: true }); } catch(e) {}
-  try { Object.defineProperty(screen, 'availHeight', { get: () => 877, configurable: true }); } catch(e) {}
   try { Object.defineProperty(window, 'devicePixelRatio', { get: () => 2, configurable: true }); } catch(e) {}
-  try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true }); } catch(e) {}
-  try {
-    const uaData = {
-      brands: [
-        {brand: 'Chromium', version: '150'},
-        {brand: 'Not(A:Brand', version: '24'},
-        {brand: 'Google Chrome', version: '150'}
-      ],
-      mobile: false, platform: 'macOS', architecture: 'x86', bitness: '64',
-      model: '', platformVersion: '10.15.7',
-      fullVersionList: [
-        {brand: 'Chromium', version: '150.0.7871.128'},
-        {brand: 'Not(A:Brand', version: '24.0.0.0'},
-        {brand: 'Google Chrome', version: '150.0.7871.128'}
-      ],
-      getHighEntropyValues: () => Promise.resolve({
-        architecture: 'x86', bitness: '64', model: '',
-        platform: 'macOS', platformVersion: '10.15.7',
-        uaFullVersion: '150.0.7871.128',
-        fullVersionList: [
-          {brand: 'Chromium', version: '150.0.7871.128'},
-          {brand: 'Not(A:Brand', version: '24.0.0.0'},
-          {brand: 'Google Chrome', version: '150.0.7871.128'}
-        ]
-      }),
-      toJSON: () => ({
-        brands: [
-          {brand: 'Chromium', version: '150'},
-          {brand: 'Not(A:Brand', version: '24'},
-          {brand: 'Google Chrome', version: '150'}
-        ],
-        mobile: false, platform: 'macOS'
-      })
-    };
-    Object.defineProperty(navigator, 'userAgentData', { get: () => uaData, configurable: true });
-  } catch(e) {}
-  try {
-    const origGetParam = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(param) {
-      if (param === 0x9245) return 'Apple Inc.';
-      if (param === 0x9246) return 'Apple M1';
-      if (param === 0x1F00) return 'WebKit';
-      if (param === 0x1F01) return 'WebKit WebGL';
-      return origGetParam.call(this, param);
-    };
-  } catch(e) {}
   return 'mac-applied';
-}"""
+}
+""" + ")"
+
+MAC_OVERRIDE_SCRIPT = STEALTH_SCRIPT
 
 
 def find_chrome() -> str:
@@ -199,6 +161,12 @@ async def goto_login(page):
     """进入我是创作者登录页"""
     await page.goto("https://creator.douyin.com/", wait_until="domcontentloaded", timeout=60000)
     await asyncio.sleep(3)
+    # 导航后必须重新注入 stealth（add_init_script 在此环境不生效，需 page.evaluate）
+    try:
+        await page.evaluate(MAC_OVERRIDE_SCRIPT)
+        print("✅ 导航后重新注入 stealth", flush=True)
+    except Exception as e:
+        print(f"⚠️ stealth 注入失败: {str(e)[:60]}")
     if "creator-micro" in page.url:
         return "ALREADY_LOGGED"
     try:
@@ -253,7 +221,7 @@ async def main():
             user_agent=MAC_UA,
         )
         # MAC 指纹覆盖（页面加载前）
-        await context.add_init_script("(" + MAC_OVERRIDE_SCRIPT + ")()")
+        await context.add_init_script(MAC_OVERRIDE_SCRIPT)
         page = await context.new_page()
         await page.evaluate(MAC_OVERRIDE_SCRIPT)  # 页面加载后再打一次
 
